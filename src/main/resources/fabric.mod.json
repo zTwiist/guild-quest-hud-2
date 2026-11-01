@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "guildquesthud",
+  "version": "${version}",
+  "name": "Guild Quest HUD",
+  "description": "Shows your /guild quests on the HUD.",
+  "authors": ["You"],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["com.example.guildquesthud.GuildQuestHud"]
+  },
+  "depends": {
+    "fabricloader": ">=0.18.0",
+    "minecraft": "~1.21.11",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}
