@@ -20,6 +20,7 @@ import net.minecraft.component.DataComponentTypes;
 import net.minecraft.component.type.LoreComponent;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
+import net.minecraft.screen.GenericContainerScreenHandler;
 import net.minecraft.text.Text;
 import net.minecraft.util.Identifier;
 import org.lwjgl.glfw.GLFW;
@@ -41,6 +42,7 @@ public class GuildQuestHud implements ClientModInitializer {
     private static final String COMMAND = "guild quests";        // command to run (no slash)
     private static final String SCREEN_TITLE = "guild quests";   // menu title to look for
     private static final int AUTO_REFRESH_SECONDS = 60;          // 0 = never auto-refresh
+    private static final boolean HIDE_QUEST_MENU = true;         // true = read the menu invisibly (no flash, no interruption)
     private static final int DEFAULT_X = 6;                      // default distance from left edge
     private static final int DEFAULT_Y = 6;                      // default distance from top edge
     // ===================================
@@ -79,6 +81,7 @@ public class GuildQuestHud implements ClientModInitializer {
     private static List<Quest> quests = new ArrayList<>();
     private static long resetAtMillis = 0;      // when new quests become available
     private static boolean expiredHandled = false;
+    private static GenericContainerScreenHandler hiddenHandler = null; // quest menu opened invisibly
 
     @Override
     public void onInitializeClient() {
@@ -105,6 +108,7 @@ public class GuildQuestHud implements ClientModInitializer {
             quests = new ArrayList<>();
             resetAtMillis = 0;
             expiredHandled = false;
+            hiddenHandler = null;
         });
     }
 
@@ -152,36 +156,74 @@ public class GuildQuestHud implements ClientModInitializer {
         }
         mc.player.networkHandler.sendChatCommand(COMMAND);
         waiting = true;
+        hiddenHandler = null;
         waitTicks = 0;
         screenSeenTicks = 0;
         sinceRefresh = 0;
     }
 
+    /**
+     * Called (from the mixin) every time the game is about to open a screen.
+     * Returns true if we want to swallow the quest menu so it never appears.
+     */
+    public static boolean interceptScreen(Screen screen) {
+        if (!HIDE_QUEST_MENU || !waiting || hiddenHandler != null) {
+            return false;
+        }
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.currentScreen != null) {
+            return false; // you have another screen open, show things normally
+        }
+        if (screen instanceof GenericContainerScreen gcs
+                && screen.getTitle().getString().toLowerCase().contains(SCREEN_TITLE)) {
+            hiddenHandler = gcs.getScreenHandler();
+            return true;
+        }
+        return false;
+    }
+
     private static void handleWaiting(MinecraftClient mc) {
         waitTicks++;
-        Screen screen = mc.currentScreen;
 
+        // invisible mode: the menu was swallowed, read it straight from the handler
+        if (hiddenHandler != null) {
+            screenSeenTicks++;
+            if (screenSeenTicks >= 2) {
+                tryFinish(mc, hiddenHandler.getInventory());
+            }
+            return;
+        }
+
+        // visible mode (fallback): the menu is on screen
+        Screen screen = mc.currentScreen;
         if (screen instanceof GenericContainerScreen gcs
                 && screen.getTitle().getString().toLowerCase().contains(SCREEN_TITLE)) {
             screenSeenTicks++;
             if (screenSeenTicks >= 2) {
-                Inventory inv = gcs.getScreenHandler().getInventory();
-                List<Quest> found = readQuests(inv);
-                if (!found.isEmpty()) {
-                    quests = found;
-                    autoEnabled = true;
-                    long secs = readTimerSeconds(inv);
-                    if (secs >= 0) {
-                        resetAtMillis = System.currentTimeMillis() + secs * 1000L;
-                        expiredHandled = false;
-                    }
-                }
-                mc.player.closeHandledScreen();
-                waiting = false;
+                tryFinish(mc, gcs.getScreenHandler().getInventory());
             }
         } else if (waitTicks > 60) {
             waiting = false; // command didn't open the menu, give up
         }
+    }
+
+    private static void tryFinish(MinecraftClient mc, Inventory inv) {
+        List<Quest> found = readQuests(inv);
+        if (found.isEmpty() && waitTicks < 30) {
+            return; // items haven't arrived yet, keep waiting
+        }
+        if (!found.isEmpty()) {
+            quests = found;
+            autoEnabled = true;
+            long secs = readTimerSeconds(inv);
+            if (secs >= 0) {
+                resetAtMillis = System.currentTimeMillis() + secs * 1000L;
+                expiredHandled = false;
+            }
+        }
+        mc.player.closeHandledScreen();
+        hiddenHandler = null;
+        waiting = false;
     }
 
     private static List<Quest> readQuests(Inventory inv) {
