@@ -3,6 +3,7 @@ package com.example.guildquesthud;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
@@ -42,6 +43,7 @@ public class GuildQuestHud implements ClientModInitializer {
     private static final String COMMAND = "guild quests";        // command to run (no slash)
     private static final String SCREEN_TITLE = "guild quests";   // menu title to look for
     private static final int AUTO_REFRESH_SECONDS = 60;          // 0 = never auto-refresh
+    private static final boolean REFRESH_ON_QUEST_MESSAGES = true; // refresh when the server announces a quest finished / new quests
     private static final boolean HIDE_QUEST_MENU = true;         // true = read the menu invisibly (no flash, no interruption)
     private static final int DEFAULT_X = 6;                      // default distance from left edge
     private static final int DEFAULT_Y = 6;                      // default distance from top edge
@@ -82,6 +84,7 @@ public class GuildQuestHud implements ClientModInitializer {
     private static long resetAtMillis = 0;      // when new quests become available
     private static boolean expiredHandled = false;
     private static GenericContainerScreenHandler hiddenHandler = null; // quest menu opened invisibly
+    private static int pendingRefreshTicks = -1;   // countdown to a refresh triggered by a chat message
 
     @Override
     public void onInitializeClient() {
@@ -109,7 +112,10 @@ public class GuildQuestHud implements ClientModInitializer {
             resetAtMillis = 0;
             expiredHandled = false;
             hiddenHandler = null;
+            pendingRefreshTicks = -1;
         });
+
+        ClientReceiveMessageEvents.GAME.register(GuildQuestHud::onGameMessage);
     }
 
     private static void onTick(MinecraftClient mc) {
@@ -125,6 +131,14 @@ public class GuildQuestHud implements ClientModInitializer {
         }
         while (editKey.wasPressed()) {
             mc.setScreen(new PositionScreen());
+        }
+
+        if (pendingRefreshTicks > 0) {
+            pendingRefreshTicks--;
+        }
+        if (pendingRefreshTicks == 0 && !waiting && mc.currentScreen == null) {
+            pendingRefreshTicks = -1;
+            requestRefresh(mc, false);
         }
 
         if (waiting) {
@@ -145,6 +159,46 @@ public class GuildQuestHud implements ClientModInitializer {
                 requestRefresh(mc, false);
             }
         }
+    }
+
+    private static void onGameMessage(Text message, boolean overlay) {
+        if (overlay || !REFRESH_ON_QUEST_MESSAGES || !autoEnabled) {
+            return;
+        }
+        String text = message.getString().trim();
+        String lower = text.toLowerCase();
+        // only react to the server's own announcements ("GUILDS • ..."), not to players typing similar things
+        if (!lower.startsWith("guilds")) {
+            return;
+        }
+
+        String doneMarker = "guild quest complete:";
+        int idx = lower.indexOf(doneMarker);
+        if (idx >= 0) {
+            markDone(text.substring(idx + doneMarker.length()));
+            scheduleRefresh();
+        } else if (lower.contains("new guild quests have become available")) {
+            scheduleRefresh();
+        }
+    }
+
+    private static void scheduleRefresh() {
+        if (pendingRefreshTicks < 0) {
+            pendingRefreshTicks = 60; // wait 3 seconds so the server has updated first
+        }
+    }
+
+    private static void markDone(String name) {
+        String target = name.replaceAll("[.!\\s]+$", "").trim();
+        List<Quest> updated = new ArrayList<>();
+        for (Quest q : quests) {
+            if (q.task().equalsIgnoreCase(target)) {
+                updated.add(new Quest(q.task(), q.total(), q.total()));
+            } else {
+                updated.add(q);
+            }
+        }
+        quests = updated;
     }
 
     private static void requestRefresh(MinecraftClient mc, boolean manual) {
