@@ -1,5 +1,6 @@
 {
   "key.guildquesthud.refresh": "Refresh quests",
   "key.guildquesthud.toggle": "Show/hide quest HUD",
+  "key.guildquesthud.edit": "Move quest HUD",
   "key.category.guildquesthud.main": "Guild Quest HUD"
 }
