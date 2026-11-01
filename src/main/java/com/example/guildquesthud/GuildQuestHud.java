@@ -6,11 +6,14 @@ import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.font.TextRenderer;
+import net.minecraft.client.gui.Click;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.screen.ingame.GenericContainerScreen;
+import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.component.DataComponentTypes;
@@ -21,8 +24,14 @@ import net.minecraft.text.Text;
 import net.minecraft.util.Identifier;
 import org.lwjgl.glfw.GLFW;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Properties;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -31,9 +40,9 @@ public class GuildQuestHud implements ClientModInitializer {
     // ===== Settings you can change =====
     private static final String COMMAND = "guild quests";        // command to run (no slash)
     private static final String SCREEN_TITLE = "guild quests";   // menu title to look for
-    private static final int AUTO_REFRESH_SECONDS = 300;         // 0 = never auto-refresh
-    private static final int HUD_X = 6;                          // distance from left edge
-    private static final int HUD_Y = 6;                          // distance from top edge
+    private static final int AUTO_REFRESH_SECONDS = 60;          // 0 = never auto-refresh
+    private static final int DEFAULT_X = 6;                      // default distance from left edge
+    private static final int DEFAULT_Y = 6;                      // default distance from top edge
     // ===================================
 
     private static final Pattern PROGRESS =
@@ -49,6 +58,17 @@ public class GuildQuestHud implements ClientModInitializer {
 
     private static KeyBinding refreshKey;
     private static KeyBinding toggleKey;
+    private static KeyBinding editKey;
+
+    private static int hudX = DEFAULT_X;
+    private static int hudY = DEFAULT_Y;
+    private static int panelW = 100;
+    private static int panelH = 40;
+
+    private static final List<Quest> SAMPLE = List.of(
+            new Quest("Farm 3,000 Glowstone", 1200, 3000),
+            new Quest("Kill 500 Slimes", 500, 500),
+            new Quest("Play for 30 minutes", 11, 30));
 
     private static boolean showHud = true;
     private static boolean waiting = false;
@@ -67,6 +87,10 @@ public class GuildQuestHud implements ClientModInitializer {
                 "key.guildquesthud.refresh", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_J, category));
         toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.guildquesthud.toggle", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_H, category));
+        editKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.guildquesthud.edit", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_K, category));
+
+        loadConfig();
 
         ClientTickEvents.END_CLIENT_TICK.register(GuildQuestHud::onTick);
         HudElementRegistry.attachElementBefore(
@@ -94,6 +118,9 @@ public class GuildQuestHud implements ClientModInitializer {
         }
         while (refreshKey.wasPressed()) {
             requestRefresh(mc, true);
+        }
+        while (editKey.wasPressed()) {
+            mc.setScreen(new PositionScreen());
         }
 
         if (waiting) {
@@ -281,10 +308,25 @@ public class GuildQuestHud implements ClientModInitializer {
         if (!showHud || quests.isEmpty() || mc.options.hudHidden) {
             return;
         }
+        // keep the box on screen even if the window got smaller
+        int x = clamp(hudX, 4, Math.max(4, mc.getWindow().getScaledWidth() - panelW + 4));
+        int y = clamp(hudY, 4, Math.max(4, mc.getWindow().getScaledHeight() - panelH + 4));
+        drawPanel(ctx, x, y, false);
+    }
 
+    private static int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private static void drawPanel(DrawContext ctx, int x, int y, boolean preview) {
+        MinecraftClient mc = MinecraftClient.getInstance();
         TextRenderer tr = mc.textRenderer;
+
+        boolean useSample = preview && quests.isEmpty();
+        List<Quest> list = useSample ? SAMPLE : quests;
+
         List<String> lines = new ArrayList<>();
-        for (Quest q : quests) {
+        for (Quest q : list) {
             lines.add(q.task() + "  " + String.format("%,d/%,d", q.current(), q.total()));
         }
 
@@ -292,6 +334,8 @@ public class GuildQuestHud implements ClientModInitializer {
         if (resetAtMillis > 0) {
             long remaining = (resetAtMillis - System.currentTimeMillis()) / 1000;
             timerLine = remaining > 0 ? "New quests in " + formatDuration(remaining) : "New quests available!";
+        } else if (useSample) {
+            timerLine = "New quests in 38m 11s";
         }
 
         int width = tr.getWidth("Guild Quests");
@@ -304,17 +348,145 @@ public class GuildQuestHud implements ClientModInitializer {
         int lineHeight = 11;
         int height = lineHeight * (lines.size() + 1 + (timerLine != null ? 1 : 0));
 
-        ctx.fill(HUD_X - 4, HUD_Y - 4, HUD_X + width + 4, HUD_Y + height + 2, 0x90000000);
-        ctx.drawText(tr, "Guild Quests", HUD_X, HUD_Y, 0xFFFFAA00, true);
+        panelW = width + 8;
+        panelH = height + 6;
 
-        int y = HUD_Y + lineHeight;
+        ctx.fill(x - 4, y - 4, x + width + 4, y + height + 2, 0x90000000);
+        ctx.drawText(tr, "Guild Quests", x, y, 0xFFFFAA00, true);
+
+        int ty = y + lineHeight;
         for (int i = 0; i < lines.size(); i++) {
-            int color = quests.get(i).done() ? 0xFF55FF55 : 0xFFFFFFFF;
-            ctx.drawText(tr, lines.get(i), HUD_X, y, color, true);
-            y += lineHeight;
+            int color = list.get(i).done() ? 0xFF55FF55 : 0xFFFFFFFF;
+            ctx.drawText(tr, lines.get(i), x, ty, color, true);
+            ty += lineHeight;
         }
         if (timerLine != null) {
-            ctx.drawText(tr, timerLine, HUD_X, y, 0xFF55FFFF, true);
+            ctx.drawText(tr, timerLine, x, ty, 0xFF55FFFF, true);
+        }
+    }
+
+    // ---------- saving the HUD position ----------
+
+    private static Path configPath() {
+        return FabricLoader.getInstance().getConfigDir().resolve("guildquesthud.properties");
+    }
+
+    private static void loadConfig() {
+        Path path = configPath();
+        if (!Files.exists(path)) {
+            return;
+        }
+        try (InputStream in = Files.newInputStream(path)) {
+            Properties props = new Properties();
+            props.load(in);
+            hudX = Integer.parseInt(props.getProperty("x", String.valueOf(DEFAULT_X)).trim());
+            hudY = Integer.parseInt(props.getProperty("y", String.valueOf(DEFAULT_Y)).trim());
+        } catch (IOException | NumberFormatException e) {
+            hudX = DEFAULT_X;
+            hudY = DEFAULT_Y;
+        }
+    }
+
+    private static void saveConfig() {
+        Properties props = new Properties();
+        props.setProperty("x", String.valueOf(hudX));
+        props.setProperty("y", String.valueOf(hudY));
+        try (OutputStream out = Files.newOutputStream(configPath())) {
+            props.store(out, "Guild Quest HUD position");
+        } catch (IOException ignored) {
+            // not a big deal, the position just won't be remembered
+        }
+    }
+
+    // ---------- the drag editor screen ----------
+
+    private static class PositionScreen extends Screen {
+        private boolean dragging = false;
+        private int grabDx = 0;
+        private int grabDy = 0;
+
+        PositionScreen() {
+            super(Text.literal("Move Quest HUD"));
+        }
+
+        @Override
+        protected void init() {
+            addDrawableChild(ButtonWidget.builder(Text.literal("Done"), button -> close())
+                    .dimensions(width / 2 - 105, height - 30, 100, 20)
+                    .build());
+            addDrawableChild(ButtonWidget.builder(Text.literal("Reset position"), button -> {
+                        hudX = DEFAULT_X;
+                        hudY = DEFAULT_Y;
+                        saveConfig();
+                    })
+                    .dimensions(width / 2 + 5, height - 30, 100, 20)
+                    .build());
+        }
+
+        @Override
+        public boolean shouldPause() {
+            return false;
+        }
+
+        @Override
+        public void render(DrawContext ctx, int mouseX, int mouseY, float delta) {
+            super.render(ctx, mouseX, mouseY, delta);
+
+            drawPanel(ctx, hudX, hudY, true);
+
+            // yellow outline so you can see what you are dragging
+            int x1 = hudX - 4;
+            int y1 = hudY - 4;
+            int x2 = x1 + panelW;
+            int y2 = y1 + panelH;
+            int outline = 0xFFFFFF55;
+            ctx.fill(x1, y1, x2, y1 + 1, outline);
+            ctx.fill(x1, y2 - 1, x2, y2, outline);
+            ctx.fill(x1, y1, x1 + 1, y2, outline);
+            ctx.fill(x2 - 1, y1, x2, y2, outline);
+
+            String hint = "Drag the box to move it. Click Done or press Esc when finished.";
+            ctx.drawText(textRenderer, hint, (width - textRenderer.getWidth(hint)) / 2, 12, 0xFFFFFFFF, true);
+        }
+
+        @Override
+        public boolean mouseClicked(Click click, boolean doubled) {
+            if (super.mouseClicked(click, doubled)) {
+                return true;
+            }
+            if (click.button() == 0) {
+                int mx = (int) click.x();
+                int my = (int) click.y();
+                int x1 = hudX - 4;
+                int y1 = hudY - 4;
+                if (mx >= x1 && mx <= x1 + panelW && my >= y1 && my <= y1 + panelH) {
+                    dragging = true;
+                    grabDx = mx - hudX;
+                    grabDy = my - hudY;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        @Override
+        public boolean mouseDragged(Click click, double offsetX, double offsetY) {
+            if (dragging) {
+                hudX = clamp((int) click.x() - grabDx, 4, Math.max(4, width - panelW + 4));
+                hudY = clamp((int) click.y() - grabDy, 4, Math.max(4, height - panelH + 4));
+                return true;
+            }
+            return super.mouseDragged(click, offsetX, offsetY);
+        }
+
+        @Override
+        public boolean mouseReleased(Click click) {
+            if (dragging) {
+                dragging = false;
+                saveConfig();
+                return true;
+            }
+            return super.mouseReleased(click);
         }
     }
 }
