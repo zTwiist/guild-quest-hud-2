@@ -25,6 +25,8 @@ import net.minecraft.screen.GenericContainerScreenHandler;
 import net.minecraft.text.Text;
 import net.minecraft.util.Identifier;
 import org.lwjgl.glfw.GLFW;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -48,6 +50,9 @@ public class GuildQuestHud implements ClientModInitializer {
     private static final int DEFAULT_X = 6;                      // default distance from left edge
     private static final int DEFAULT_Y = 6;                      // default distance from top edge
     // ===================================
+
+    private static final Logger LOGGER = LoggerFactory.getLogger("GuildQuestHud");
+    private static boolean hookLogged = false;
 
     private static final Pattern PROGRESS =
             Pattern.compile("Progress:\\s*([\\d,]+)\\s*/\\s*([\\d,]+)", Pattern.CASE_INSENSITIVE);
@@ -97,6 +102,7 @@ public class GuildQuestHud implements ClientModInitializer {
                 "key.guildquesthud.edit", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_K, category));
 
         loadConfig();
+        LOGGER.info("[GQH] mod initialised (HIDE_QUEST_MENU={}, AUTO_REFRESH_SECONDS={})", HIDE_QUEST_MENU, AUTO_REFRESH_SECONDS);
 
         ClientTickEvents.END_CLIENT_TICK.register(GuildQuestHud::onTick);
         HudElementRegistry.attachElementBefore(
@@ -172,6 +178,7 @@ public class GuildQuestHud implements ClientModInitializer {
             return;
         }
 
+        LOGGER.info("[GQH] guild chat message seen: {}", text);
         String doneMarker = "guild quest complete:";
         int idx = lower.indexOf(doneMarker);
         if (idx >= 0) {
@@ -208,6 +215,7 @@ public class GuildQuestHud implements ClientModInitializer {
         if (!manual && mc.currentScreen != null) {
             return;
         }
+        LOGGER.info("[GQH] refresh requested (manual={})", manual);
         mc.player.networkHandler.sendChatCommand(COMMAND);
         waiting = true;
         hiddenHandler = null;
@@ -221,6 +229,16 @@ public class GuildQuestHud implements ClientModInitializer {
      * Returns true if we want to swallow the quest menu so it never appears.
      */
     public static boolean interceptScreen(Screen screen) {
+        if (!hookLogged) {
+            hookLogged = true;
+            LOGGER.info("[GQH] screen hook is active");
+        }
+        boolean isQuestMenu = screen instanceof GenericContainerScreen
+                && screen.getTitle().getString().toLowerCase().contains(SCREEN_TITLE);
+        if (isQuestMenu) {
+            LOGGER.info("[GQH] quest menu opening: hide={}, waiting={}, alreadyHidden={}, otherScreenOpen={}",
+                    HIDE_QUEST_MENU, waiting, hiddenHandler != null, MinecraftClient.getInstance().currentScreen != null);
+        }
         if (!HIDE_QUEST_MENU || !waiting || hiddenHandler != null) {
             return false;
         }
@@ -228,9 +246,9 @@ public class GuildQuestHud implements ClientModInitializer {
         if (mc.currentScreen != null) {
             return false; // you have another screen open, show things normally
         }
-        if (screen instanceof GenericContainerScreen gcs
-                && screen.getTitle().getString().toLowerCase().contains(SCREEN_TITLE)) {
-            hiddenHandler = gcs.getScreenHandler();
+        if (isQuestMenu) {
+            hiddenHandler = ((GenericContainerScreen) screen).getScreenHandler();
+            LOGGER.info("[GQH] quest menu hidden");
             return true;
         }
         return false;
@@ -242,7 +260,7 @@ public class GuildQuestHud implements ClientModInitializer {
         // invisible mode: the menu was swallowed, read it straight from the handler
         if (hiddenHandler != null) {
             screenSeenTicks++;
-            if (screenSeenTicks >= 2) {
+            if (screenSeenTicks >= 1) {
                 tryFinish(mc, hiddenHandler.getInventory());
             }
             return;
@@ -253,7 +271,7 @@ public class GuildQuestHud implements ClientModInitializer {
         if (screen instanceof GenericContainerScreen gcs
                 && screen.getTitle().getString().toLowerCase().contains(SCREEN_TITLE)) {
             screenSeenTicks++;
-            if (screenSeenTicks >= 2) {
+            if (screenSeenTicks >= 1) {
                 tryFinish(mc, gcs.getScreenHandler().getInventory());
             }
         } else if (waitTicks > 60) {
@@ -266,10 +284,12 @@ public class GuildQuestHud implements ClientModInitializer {
         if (found.isEmpty() && waitTicks < 30) {
             return; // items haven't arrived yet, keep waiting
         }
+        LOGGER.info("[GQH] read {} quests (hidden={}, waitedTicks={})", found.size(), hiddenHandler != null, waitTicks);
         if (!found.isEmpty()) {
             quests = found;
             autoEnabled = true;
             long secs = readTimerSeconds(inv);
+            LOGGER.info("[GQH] timer seconds = {}", secs);
             if (secs >= 0) {
                 resetAtMillis = System.currentTimeMillis() + secs * 1000L;
                 expiredHandled = false;
