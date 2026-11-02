@@ -47,8 +47,11 @@ public class GuildQuestHud implements ClientModInitializer {
     private static final int AUTO_REFRESH_SECONDS = 60;          // 0 = never auto-refresh
     private static final boolean REFRESH_ON_QUEST_MESSAGES = true; // refresh when the server announces a quest finished / new quests
     private static final boolean HIDE_QUEST_MENU = true;         // true = read the menu invisibly (no flash, no interruption)
-    private static final int DEFAULT_X = 6;                      // default distance from left edge
-    private static final int DEFAULT_Y = 6;                      // default distance from top edge
+    private static final int DEFAULT_X = 2;                      // default distance from left edge
+    private static final int DEFAULT_Y = 2;                      // default distance from top edge
+    private static final float DEFAULT_SCALE = 1.0f;             // default size (1.0 = normal)
+    private static final float MIN_SCALE = 0.5f;
+    private static final float MAX_SCALE = 3.0f;
     // ===================================
 
     private static final Logger LOGGER = LoggerFactory.getLogger("GuildQuestHud");
@@ -71,6 +74,7 @@ public class GuildQuestHud implements ClientModInitializer {
 
     private static int hudX = DEFAULT_X;
     private static int hudY = DEFAULT_Y;
+    private static float hudScale = DEFAULT_SCALE;
     private static int panelW = 100;
     private static int panelH = 40;
 
@@ -425,8 +429,8 @@ public class GuildQuestHud implements ClientModInitializer {
             return;
         }
         // keep the box on screen even if the window got smaller
-        int x = clamp(hudX, 4, Math.max(4, mc.getWindow().getScaledWidth() - panelW + 4));
-        int y = clamp(hudY, 4, Math.max(4, mc.getWindow().getScaledHeight() - panelH + 4));
+        int x = clamp(hudX, 0, Math.max(0, mc.getWindow().getScaledWidth() - panelW));
+        int y = clamp(hudY, 0, Math.max(0, mc.getWindow().getScaledHeight() - panelH));
         drawPanel(ctx, x, y, false);
     }
 
@@ -434,6 +438,11 @@ public class GuildQuestHud implements ClientModInitializer {
         return Math.max(min, Math.min(max, value));
     }
 
+    private static float clampScale(float value) {
+        return Math.max(MIN_SCALE, Math.min(MAX_SCALE, value));
+    }
+
+    /** (x, y) is the top-left corner of the box on screen. */
     private static void drawPanel(DrawContext ctx, int x, int y, boolean preview) {
         MinecraftClient mc = MinecraftClient.getInstance();
         TextRenderer tr = mc.textRenderer;
@@ -454,34 +463,44 @@ public class GuildQuestHud implements ClientModInitializer {
             timerLine = "New quests in 38m 11s";
         }
 
-        int width = tr.getWidth("Guild Quests");
+        int textWidth = tr.getWidth("Guild Quests");
         for (String line : lines) {
-            width = Math.max(width, tr.getWidth(line));
+            textWidth = Math.max(textWidth, tr.getWidth(line));
         }
         if (timerLine != null) {
-            width = Math.max(width, tr.getWidth(timerLine));
+            textWidth = Math.max(textWidth, tr.getWidth(timerLine));
         }
         int lineHeight = 11;
-        int height = lineHeight * (lines.size() + 1 + (timerLine != null ? 1 : 0));
+        int textHeight = lineHeight * (lines.size() + 1 + (timerLine != null ? 1 : 0));
 
-        panelW = width + 8;
-        panelH = height + 6;
+        int boxW = textWidth + 8;
+        int boxH = textHeight + 6;
 
-        ctx.fill(x - 4, y - 4, x + width + 4, y + height + 2, 0x90000000);
-        ctx.drawText(tr, "Guild Quests", x, y, 0xFFFFAA00, true);
+        // size of the box on screen after scaling (used for dragging and keeping it on screen)
+        panelW = Math.round(boxW * hudScale);
+        panelH = Math.round(boxH * hudScale);
 
-        int ty = y + lineHeight;
+        ctx.getMatrices().pushMatrix();
+        ctx.getMatrices().translate((float) x, (float) y);
+        ctx.getMatrices().scale(hudScale, hudScale);
+
+        ctx.fill(0, 0, boxW, boxH, 0x90000000);
+        ctx.drawText(tr, "Guild Quests", 4, 4, 0xFFFFAA00, true);
+
+        int ty = 4 + lineHeight;
         for (int i = 0; i < lines.size(); i++) {
             int color = list.get(i).done() ? 0xFF55FF55 : 0xFFFFFFFF;
-            ctx.drawText(tr, lines.get(i), x, ty, color, true);
+            ctx.drawText(tr, lines.get(i), 4, ty, color, true);
             ty += lineHeight;
         }
         if (timerLine != null) {
-            ctx.drawText(tr, timerLine, x, ty, 0xFF55FFFF, true);
+            ctx.drawText(tr, timerLine, 4, ty, 0xFF55FFFF, true);
         }
+
+        ctx.getMatrices().popMatrix();
     }
 
-    // ---------- saving the HUD position ----------
+    // ---------- saving the HUD position and size ----------
 
     private static Path configPath() {
         return FabricLoader.getInstance().getConfigDir().resolve("guildquesthud.properties");
@@ -497,9 +516,11 @@ public class GuildQuestHud implements ClientModInitializer {
             props.load(in);
             hudX = Integer.parseInt(props.getProperty("x", String.valueOf(DEFAULT_X)).trim());
             hudY = Integer.parseInt(props.getProperty("y", String.valueOf(DEFAULT_Y)).trim());
+            hudScale = clampScale(Float.parseFloat(props.getProperty("scale", String.valueOf(DEFAULT_SCALE)).trim()));
         } catch (IOException | NumberFormatException e) {
             hudX = DEFAULT_X;
             hudY = DEFAULT_Y;
+            hudScale = DEFAULT_SCALE;
         }
     }
 
@@ -507,11 +528,17 @@ public class GuildQuestHud implements ClientModInitializer {
         Properties props = new Properties();
         props.setProperty("x", String.valueOf(hudX));
         props.setProperty("y", String.valueOf(hudY));
+        props.setProperty("scale", String.valueOf(hudScale));
         try (OutputStream out = Files.newOutputStream(configPath())) {
-            props.store(out, "Guild Quest HUD position");
+            props.store(out, "Guild Quest HUD position and size");
         } catch (IOException ignored) {
-            // not a big deal, the position just won't be remembered
+            // not a big deal, the settings just won't be remembered
         }
+    }
+
+    private static void changeScale(float delta) {
+        hudScale = clampScale(Math.round((hudScale + delta) * 10f) / 10f);
+        saveConfig();
     }
 
     // ---------- the drag editor screen ----------
@@ -527,15 +554,24 @@ public class GuildQuestHud implements ClientModInitializer {
 
         @Override
         protected void init() {
-            addDrawableChild(ButtonWidget.builder(Text.literal("Done"), button -> close())
-                    .dimensions(width / 2 - 105, height - 30, 100, 20)
+            int y = height - 30;
+            int left = width / 2 - 130;
+            addDrawableChild(ButtonWidget.builder(Text.literal("-"), button -> changeScale(-0.1f))
+                    .dimensions(left, y, 20, 20)
                     .build());
-            addDrawableChild(ButtonWidget.builder(Text.literal("Reset position"), button -> {
+            addDrawableChild(ButtonWidget.builder(Text.literal("+"), button -> changeScale(0.1f))
+                    .dimensions(left + 24, y, 20, 20)
+                    .build());
+            addDrawableChild(ButtonWidget.builder(Text.literal("Reset"), button -> {
                         hudX = DEFAULT_X;
                         hudY = DEFAULT_Y;
+                        hudScale = DEFAULT_SCALE;
                         saveConfig();
                     })
-                    .dimensions(width / 2 + 5, height - 30, 100, 20)
+                    .dimensions(left + 52, y, 100, 20)
+                    .build());
+            addDrawableChild(ButtonWidget.builder(Text.literal("Done"), button -> close())
+                    .dimensions(left + 160, y, 100, 20)
                     .build());
         }
 
@@ -548,11 +584,15 @@ public class GuildQuestHud implements ClientModInitializer {
         public void render(DrawContext ctx, int mouseX, int mouseY, float delta) {
             super.render(ctx, mouseX, mouseY, delta);
 
+            // keep the box fully on screen (for example after making it bigger)
+            hudX = clamp(hudX, 0, Math.max(0, width - panelW));
+            hudY = clamp(hudY, 0, Math.max(0, height - panelH));
+
             drawPanel(ctx, hudX, hudY, true);
 
             // yellow outline so you can see what you are dragging
-            int x1 = hudX - 4;
-            int y1 = hudY - 4;
+            int x1 = hudX;
+            int y1 = hudY;
             int x2 = x1 + panelW;
             int y2 = y1 + panelH;
             int outline = 0xFFFFFF55;
@@ -561,8 +601,10 @@ public class GuildQuestHud implements ClientModInitializer {
             ctx.fill(x1, y1, x1 + 1, y2, outline);
             ctx.fill(x2 - 1, y1, x2, y2, outline);
 
-            String hint = "Drag the box to move it. Click Done or press Esc when finished.";
+            String hint = "Drag the box to move it. Use - and + to change its size.";
             ctx.drawText(textRenderer, hint, (width - textRenderer.getWidth(hint)) / 2, 12, 0xFFFFFFFF, true);
+            String size = "Size: " + Math.round(hudScale * 100) + "%";
+            ctx.drawText(textRenderer, size, (width - textRenderer.getWidth(size)) / 2, height - 44, 0xFFFFFF55, true);
         }
 
         @Override
@@ -573,9 +615,7 @@ public class GuildQuestHud implements ClientModInitializer {
             if (click.button() == 0) {
                 int mx = (int) click.x();
                 int my = (int) click.y();
-                int x1 = hudX - 4;
-                int y1 = hudY - 4;
-                if (mx >= x1 && mx <= x1 + panelW && my >= y1 && my <= y1 + panelH) {
+                if (mx >= hudX && mx <= hudX + panelW && my >= hudY && my <= hudY + panelH) {
                     dragging = true;
                     grabDx = mx - hudX;
                     grabDy = my - hudY;
@@ -588,8 +628,8 @@ public class GuildQuestHud implements ClientModInitializer {
         @Override
         public boolean mouseDragged(Click click, double offsetX, double offsetY) {
             if (dragging) {
-                hudX = clamp((int) click.x() - grabDx, 4, Math.max(4, width - panelW + 4));
-                hudY = clamp((int) click.y() - grabDy, 4, Math.max(4, height - panelH + 4));
+                hudX = clamp((int) click.x() - grabDx, 0, Math.max(0, width - panelW));
+                hudY = clamp((int) click.y() - grabDy, 0, Math.max(0, height - panelH));
                 return true;
             }
             return super.mouseDragged(click, offsetX, offsetY);
